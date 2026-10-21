@@ -2,7 +2,7 @@
 
 Local-first, **zero-key, zero-quota** web search MCP server. Four lean tools that give any MCP client (ZCode, Claude Code, Codex, generic MCP) web search, news search, GitHub search and a token-efficient page/PDF fetcher — with no API keys, no signups and no hosted service metering your account.
 
-**Why:** built-in web search tools of AI coding plans are hosted and account-quota-metered. When the quota runs out, the agent goes blind for days. This server runs entirely on your machine: search goes through the [`ddgs`](https://pypi.org/project/ddgs/) aggregator library, which queries DuckDuckGo / Bing / Brave / Mojeek / Yahoo and falls back across engines when one rate-limits (403/429 are routine and handled).
+**Why:** built-in web search tools of AI coding plans are hosted and account-quota-metered. When the quota runs out, the agent goes blind for days. This server runs entirely on your machine: search goes through the [`ddgs`](https://pypi.org/project/ddgs/) aggregator library, which queries DuckDuckGo / Bing / Brave / Mojeek / Yahoo and falls back across engines when one rate-limits (403/429 are routine and handled). If you have a Brave Search API key, that official API is tried first instead.
 
 ## Tools (4)
 
@@ -47,7 +47,8 @@ Or run from a source checkout: `command`: `<python>`, `args`: `["/path/to/server
 
 | Var | Effect |
 |---|---|
-| `SEARXNG_URL` | Try a SearXNG instance with JSON format enabled before `ddgs`. |
+| `BRAVE_API_KEY` or `~/.config/websearch-mcp/brave.key` | Use the official [Brave Search API](https://brave.com/search/api/) first — best relevance; the free tier is monthly-capped, and the local cache stretches it. `BRAVE_KEY_FILE` overrides the path. |
+| `SEARXNG_URL` | Try a SearXNG instance with JSON format enabled before Brave/`ddgs`. |
 | `GITHUB_TOKEN` | Raises GitHub API rate limits for `search_github`. Only ever sent as an Authorization header to `api.github.com`. |
 | `WEBSEARCH_ALLOW_PRIVATE_HOSTS` | `1` lets `fetch` reach loopback/private hosts (blocked by default). |
 
@@ -57,7 +58,7 @@ Or run from a source checkout: `command`: `<python>`, `args`: `["/path/to/server
 |---|---|---|---|---|---|---|
 | API keys / quota | none / none | none / none | none / none | none / none | none / none | account quota |
 | Footprint | 1 venv, ~200 MB deps | Python, 11 tools | MCP + CLI + daemon | Node ≥ 20, **~1.5 GB** incl. browser engine + on-device models | light | zero local |
-| Engines | ddgs chain + region fallback | multi-engine, RRF-merged | bing/baidu/ddg/brave/startpage/sogou/HN (CN-leaning) | many | DDG only | vendor |
+| Engines | Brave API (optional key) → ddgs chain + region fallback | multi-engine, RRF-merged | bing/baidu/ddg/brave/startpage/sogou/HN (CN-leaning) | many | DDG only | vendor |
 | Fetch + extraction | trafilatura + raw fallback | trafilatura + more | article fetch | yes | fetch + parse | yes (some digest server-side) |
 | PDF | text-based | PDF/DOCX/XLSX/PPTX/EPUB | ✗ | yes | ✗ | varies |
 | Local cache | sqlite, 24 h / 7 d | FTS5 | ✗ | yes | ✗ | ✗ |
