@@ -8,8 +8,9 @@ Local-first, **zero-key, zero-quota** web search MCP server. Four lean tools tha
 
 | Tool | What it does |
 |---|---|
-| `search(query, max_results?, region?)` | Web search: numbered title / URL / snippet. Cyrillic queries automatically try `ru-ru` first, then `wt-wt`; Latin — `wt-wt`, then `us-en`. |
-| `search_news(query, max_results?, region?)` | News search with dates. |
+| `search(query, max_results?, region?)` | Web search: title / URL / snippet. Route: SearXNG (if configured) → Brave (if key) → `ddgs` engine chain with Cyrillic-aware region fallback (`ru-ru` → `wt-wt`). |
+| `search_news(query, max_results?, region?)` | News search with dates and sources. Route: zero-key Google News RSS → Brave news → `ddgs`. |
+| `search_semantic(query, max_results?)` | Neural "find articles about X" search. Route: Exa → Tavily → `ddgs` (Exa/Tavily join when their keys are installed). |
 | `search_github(query, kind?, max_results?)` | GitHub via the official REST API, **no token needed** (`repos` sorted by stars / `issues`). Set `GITHUB_TOKEN` for higher limits. |
 | `fetch(url, maxlen?)` | GET a page → reader-mode main content (links + tables kept, via `trafilatura`; ~6× fewer tokens than a raw dump), falling back to raw HTML→text when extraction finds nothing. Text-based PDFs supported. JS-walled pages are detected and return a hint to use browser automation instead of dumping noise. |
 
@@ -47,7 +48,9 @@ Or run from a source checkout: `command`: `<python>`, `args`: `["/path/to/server
 
 | Var | Effect |
 |---|---|
-| `BRAVE_API_KEY` or `~/.config/websearch-mcp/brave.key` | Use the official [Brave Search API](https://brave.com/search/api/) first — best relevance; the free tier is monthly-capped, and the local cache stretches it. `BRAVE_KEY_FILE` overrides the path. |
+| `BRAVE_API_KEY` or `~/.config/websearch-mcp/brave.key` | Use the official [Brave Search API](https://brave.com/search/api/) first in `search`/`search_news` — best relevance; the free tier is monthly-capped, and the local cache stretches it. |
+| `EXA_API_KEY` or `~/.config/websearch-mcp/exa.key` | Enable [Exa](https://exa.ai) neural search as the first engine of `search_semantic` (~2,500 free Lite searches/month). |
+| `TAVILY_API_KEY` or `~/.config/websearch-mcp/tavily.key` | Enable [Tavily](https://tavily.com) as the second engine of `search_semantic` (1,000 free credits/month). |
 | `SEARXNG_URL` | Try a SearXNG instance with JSON format enabled before Brave/`ddgs`. |
 | `GITHUB_TOKEN` | Raises GitHub API rate limits for `search_github`. Only ever sent as an Authorization header to `api.github.com`. |
 | `WEBSEARCH_ALLOW_PRIVATE_HOSTS` | `1` lets `fetch` reach loopback/private hosts (blocked by default). |
@@ -58,7 +61,7 @@ Or run from a source checkout: `command`: `<python>`, `args`: `["/path/to/server
 |---|---|---|---|---|---|---|
 | API keys / quota | none / none | none / none | none / none | none / none | none / none | account quota |
 | Footprint | 1 venv, ~200 MB deps | Python, 11 tools | MCP + CLI + daemon | Node ≥ 20, **~1.5 GB** incl. browser engine + on-device models | light | zero local |
-| Engines | Brave API (optional key) → ddgs chain + region fallback | multi-engine, RRF-merged | bing/baidu/ddg/brave/startpage/sogou/HN (CN-leaning) | many | DDG only | vendor |
+| Engines | routed per tool: Brave / GNews RSS / Exa / Tavily (optional keys) → ddgs chain + region fallback | multi-engine, RRF-merged | bing/baidu/ddg/brave/startpage/sogou/HN (CN-leaning) | many | DDG only | vendor |
 | Fetch + extraction | trafilatura + raw fallback | trafilatura + more | article fetch | yes | fetch + parse | yes (some digest server-side) |
 | PDF | text-based | PDF/DOCX/XLSX/PPTX/EPUB | ✗ | yes | ✗ | varies |
 | Local cache | sqlite, 24 h / 7 d | FTS5 | ✗ | yes | ✗ | ✗ |
