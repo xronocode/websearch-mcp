@@ -1,6 +1,0 @@
-mcp<2,>=1.9
-ddgs>=9
-httpx>=0.27
-html2text>=2024.2.26
-trafilatura>=2.0
-pypdf>=5
