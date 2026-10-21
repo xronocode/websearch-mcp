@@ -13,11 +13,13 @@ relevance, and its free tier is monthly-capped, so the local cache matters.
 If env SEARXNG_URL is set (a local SearXNG with JSON format enabled, optional),
 it is tried before Brave.
 
-Tools:
-  search(query, max_results, region)      -- web search: title/url/snippet
-  search_news(query, max_results, region) -- news search
-  search_github(query, kind, max_results) -- GitHub repositories/issues via REST API
-  fetch(url, maxlen)                      -- GET page/PDF -> readable text
+Tools (each system routed to the engines that fit it; the [engine: ...] tag
+in the output shows who answered):
+  search(query, ...)          -- web search:    searxng -> Brave -> ddgs(regions)
+  search_news(query, ...)     -- news search:   Google News RSS -> Brave -> ddgs
+  search_semantic(query, ...) -- neural search: Exa -> Tavily -> ddgs
+  search_github(query, ...)   -- GitHub repositories/issues via REST API
+  fetch(url, maxlen)          -- GET page/PDF -> readable text
 
 fetch extracts the main content (links + tables kept) via trafilatura, falls
 back to raw HTML->text when extraction fails; text-based PDFs via pypdf. Both
@@ -91,27 +93,35 @@ UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
 )
-# Brave Search API key: env BRAVE_API_KEY or a file (chmod 600). When present,
-# Brave is tried before ddgs (better relevance, official API, free tier is
-# monthly-capped, so the cache matters); ddgs stays the fallback.
-BRAVE_KEY_FILE = os.path.expanduser(
-    os.environ.get("BRAVE_KEY_FILE", "~/.config/websearch-mcp/brave.key")
+# API keys live in a chmod-700 dir (default ~/.config/websearch-mcp/<name>.key,
+# chmod 600) or in env vars. Each engine joins the chain only when its key is
+# present; on any error/empty answer the chain falls through to the next engine.
+_KEYS_DIR = os.path.expanduser(
+    os.environ.get("WEBSEARCH_KEYS_DIR", "~/.config/websearch-mcp")
 )
 
 
-def _brave_key():
-    tok = os.environ.get("BRAVE_API_KEY", "").strip()
+def _key_from(env_var, filename, extra_path_env=None):
+    tok = os.environ.get(env_var, "").strip()
     if tok:
         return tok
-    try:
-        with open(BRAVE_KEY_FILE) as f:
-            return f.read().strip() or None
-    except OSError:
-        return None
+    paths = []
+    if extra_path_env and os.environ.get(extra_path_env):
+        paths.append(os.path.expanduser(os.environ[extra_path_env]))
+    paths.append(os.path.join(_KEYS_DIR, filename))
+    for p in paths:
+        try:
+            with open(p) as f:
+                tok = f.read().strip()
+                if tok:
+                    return tok
+        except OSError:
+            continue
+    return None
 
 
 def _brave(query, n, news):
-    key = _brave_key()
+    key = _key_from("BRAVE_API_KEY", "brave.key", "BRAVE_KEY_FILE")
     if not key:
         return None
     try:
@@ -147,6 +157,108 @@ def _brave(query, n, news):
         return out or None
     except Exception:
         return None
+
+
+def _exa(query, n):
+    """Exa neural search (semantic 'find articles about X')."""
+    key = _key_from("EXA_API_KEY", "exa.key")
+    if not key:
+        return None
+    try:
+        r = httpx.post(
+            "https://api.exa.ai/search",
+            headers={"x-api-key": key, "Content-Type": "application/json"},
+            json={"query": query, "numResults": min(n, 10), "type": "auto"},
+            timeout=15,
+        )
+        if r.status_code != 200:
+            return None
+        return [
+            {
+                "title": x.get("title", ""),
+                "url": x.get("url", ""),
+                "body": (x.get("text") or "")[:200],
+                "date": (x.get("publishedDate") or "")[:10],
+            }
+            for x in r.json().get("results", [])
+        ] or None
+    except Exception:
+        return None
+
+
+def _tavily(query, n):
+    """Tavily agent search."""
+    key = _key_from("TAVILY_API_KEY", "tavily.key")
+    if not key:
+        return None
+    try:
+        r = httpx.post(
+            "https://api.tavily.com/search",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={"query": query, "max_results": min(n, 10)},
+            timeout=15,
+        )
+        if r.status_code != 200:
+            return None
+        return [
+            {
+                "title": x.get("title", ""),
+                "url": x.get("url", ""),
+                "body": (x.get("content") or "")[:200],
+                "date": (x.get("published_date") or "")[:10],
+            }
+            for x in r.json().get("results", [])
+        ] or None
+    except Exception:
+        return None
+
+
+def _gnews_rss(query, n):
+    """Google News RSS: zero-key news search, no scraping."""
+    import xml.etree.ElementTree as ET
+
+    if _CYRILLIC.search(query):
+        hl, gl, ceid = "ru", "RU", "RU:ru"
+    else:
+        hl, gl, ceid = "en", "US", "US:en"
+    try:
+        r = httpx.get(
+            "https://news.google.com/rss/search",
+            params={"q": query, "hl": hl, "gl": gl, "ceid": ceid},
+            headers={"User-Agent": UA},
+            timeout=12,
+            follow_redirects=True,
+        )
+        if r.status_code != 200:
+            return None
+        root = ET.fromstring(r.text)
+        out = []
+        for item in root.findall(".//item")[:n]:
+            title = (item.findtext("title") or "").strip()
+            link = (item.findtext("link") or "").strip()
+            pub = (item.findtext("pubDate") or "").strip()
+            src_el = item.find("source")
+            src = (src_el.text or "").strip() if src_el is not None else ""
+            if src and title.endswith(" - " + src):
+                title = title[: -(len(src) + 3)]
+            out.append({"title": title, "url": link, "body": src, "date": pub[:16]})
+        return out or None
+    except Exception:
+        return None
+
+
+def _run_chain(engines):
+    """engines: list of (name, callable -> list|None). Returns (name, results)."""
+    last_err = "unknown"
+    for name, fn in engines:
+        try:
+            res = fn()
+            if res:
+                return name, res
+            last_err = f"{name}: no results"
+        except Exception as e:
+            last_err = f"{name}: {e}"
+    raise RuntimeError(f"all engines failed ({last_err})")
 ALLOW_PRIVATE_HOSTS = os.environ.get("WEBSEARCH_ALLOW_PRIVATE_HOSTS", "") == "1"
 MAX_BODY_BYTES = 20 * 1024 * 1024
 
@@ -234,17 +346,36 @@ def _regions_for(query, region):
 
 
 def _search_all(query, n, news, region):
+    """General web search: searxng -> brave -> ddgs (region chain)."""
     last_err = "unknown"
     for reg in _regions_for(query, region):
-        try:
-            res = _searxng(query, n, news) or _brave(query, n, news) or _ddgs(query, n, news, reg)
-            if res:
-                return res
-            last_err = f"region {reg}: no results"
-        except Exception as e:
-            last_err = f"region {reg}: {e}"
+        for name, fn in (
+            ("searxng", lambda: _searxng(query, n, news)),
+            ("brave", lambda: _brave(query, n, news)),
+            (f"ddgs:{reg}", lambda: _ddgs(query, n, news, reg)),
+        ):
+            try:
+                res = fn()
+                if res:
+                    return name, res
+                last_err = f"{name}: no results"
+            except Exception as e:
+                last_err = f"{name}: {e}"
         time.sleep(1.2)
     raise RuntimeError(f"all engines failed ({last_err})")
+
+
+def _news_search_all(query, n):
+    """News search: zero-key Google News RSS first (saves API quota),
+    then Brave news, then ddgs."""
+    return _run_chain(
+        [
+            ("gnews-rss", lambda: _gnews_rss(query, n)),
+            ("brave", lambda: _brave(query, n, news=True)),
+            ("ddgs:ru-ru", lambda: _ddgs(query, n, news=True, region="ru-ru")),
+            ("ddgs:wt-wt", lambda: _ddgs(query, n, news=True, region="wt-wt")),
+        ]
+    )
 
 
 def _html_to_text(html: str, url: str) -> str:
@@ -272,37 +403,64 @@ def _html_to_text(html: str, url: str) -> str:
 def search(query: str, max_results: int = 8, region: str = "") -> str:
     """Free LOCAL web search, no provider quota. DEFAULT choice for web search in this
     environment: try this tool first; use the built-in WebSearch only if this one errors.
-    Returns numbered results (title, URL, snippet). region optional ('ru-ru', 'us-en');
-    empty = auto (Cyrillic query -> ru-ru first). Results cached locally for 24h.
-    Docs of libraries need no special engine: search 'site:docs...' + fetch the page."""
+    Returns numbered results (title, URL, snippet) and an [engine: ...] tag showing who
+    answered. region optional ('ru-ru', 'us-en'); empty = auto (Cyrillic -> ru-ru first).
+    Results cached locally for 24h. Docs of libraries need no special engine: search
+    'site:docs...' + fetch the page."""
     key = _ckey("search", query.strip().lower(), max_results, region)
     hit = _cache_get(key, TTL_SEARCH)
     if hit is not None:
         return hit
     try:
-        out = _fmt(_search_all(query, max_results, news=False, region=region))
+        name, res = _search_all(query, max_results, news=False, region=region)
     except Exception as e:
         return f"search failed: {type(e).__name__}: {e}"
-    if not out.startswith("no results"):
-        _cache_put(key, out)
+    out = _fmt(res) + f"\n[engine: {name}]"
+    _cache_put(key, out)
     return out
 
 
 @mcp.tool()
 def search_news(query: str, max_results: int = 8, region: str = "") -> str:
     """Free LOCAL news search, no provider quota. Use for fresh announcements, launches,
-    tariff/partnership news. Returns title, URL, date, snippet. region optional, empty = auto.
-    Results cached locally for 24h."""
-    key = _ckey("news", query.strip().lower(), max_results, region)
+    tariff/partnership news. Route: Google News RSS (zero-key) -> Brave news -> ddgs.
+    Returns title, URL, source, date and an [engine: ...] tag. Results cached 24h."""
+    key = _ckey("news", query.strip().lower(), max_results)
     hit = _cache_get(key, TTL_SEARCH)
     if hit is not None:
         return hit
     try:
-        out = _fmt(_search_all(query, max_results, news=True, region=region))
+        name, res = _news_search_all(query, max_results)
     except Exception as e:
         return f"search_news failed: {type(e).__name__}: {e}"
-    if not out.startswith("no results"):
-        _cache_put(key, out)
+    out = _fmt(res) + f"\n[engine: {name}]"
+    _cache_put(key, out)
+    return out
+
+
+@mcp.tool()
+def search_semantic(query: str, max_results: int = 6) -> str:
+    """Free LOCAL semantic/neural web search. Use for meaning-style research queries —
+    'articles about X', 'how companies solve Y', solution discovery — where keyword
+    search misses. Route: Exa (neural) -> Tavily -> ddgs fallback; Exa/Tavily join only
+    when their keys are installed (~/.config/websearch-mcp/exa.key / tavily.key).
+    Returns title, URL, snippet, date and an [engine: ...] tag. Cached 24h."""
+    key = _ckey("semantic", query.strip().lower(), max_results)
+    hit = _cache_get(key, TTL_SEARCH)
+    if hit is not None:
+        return hit
+    try:
+        name, res = _run_chain(
+            [
+                ("exa", lambda: _exa(query, max_results)),
+                ("tavily", lambda: _tavily(query, max_results)),
+                ("ddgs:wt-wt", lambda: _ddgs(query, max_results, news=False, region="wt-wt")),
+            ]
+        )
+    except Exception as e:
+        return f"search_semantic failed: {type(e).__name__}: {e}"
+    out = _fmt(res) + f"\n[engine: {name}]"
+    _cache_put(key, out)
     return out
 
 
