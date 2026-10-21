@@ -6,8 +6,12 @@ server. Motivation: built-in web search/fetch tools of AI coding plans are
 hosted and account-quota-metered - when the quota dies, the agent goes blind
 for days. This server runs entirely on your machine: search goes through the
 `ddgs` aggregator library (DuckDuckGo/Bing/Brave/Mojeek/Yahoo backends, no API
-keys, no signup, no quota). If env SEARXNG_URL is set (a local SearXNG with
-JSON format enabled, optional), it is tried first.
+keys, no signup, no quota). If a Brave Search API key is available (env
+BRAVE_API_KEY, or a chmod-600 file at ~/.config/websearch-mcp/brave.key,
+overridable via BRAVE_KEY_FILE), the official Brave API is tried first — best
+relevance, and its free tier is monthly-capped, so the local cache matters.
+If env SEARXNG_URL is set (a local SearXNG with JSON format enabled, optional),
+it is tried before Brave.
 
 Tools:
   search(query, max_results, region)      -- web search: title/url/snippet
@@ -87,6 +91,62 @@ UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
 )
+# Brave Search API key: env BRAVE_API_KEY or a file (chmod 600). When present,
+# Brave is tried before ddgs (better relevance, official API, free tier is
+# monthly-capped, so the cache matters); ddgs stays the fallback.
+BRAVE_KEY_FILE = os.path.expanduser(
+    os.environ.get("BRAVE_KEY_FILE", "~/.config/websearch-mcp/brave.key")
+)
+
+
+def _brave_key():
+    tok = os.environ.get("BRAVE_API_KEY", "").strip()
+    if tok:
+        return tok
+    try:
+        with open(BRAVE_KEY_FILE) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
+def _brave(query, n, news):
+    key = _brave_key()
+    if not key:
+        return None
+    try:
+        api = (
+            "https://api.search.brave.com/res/v1/news/search"
+            if news
+            else "https://api.search.brave.com/res/v1/web/search"
+        )
+        r = httpx.get(
+            api,
+            params={"q": query, "count": min(n, 20)},
+            headers={
+                "X-Subscription-Token": key,
+                "Accept": "application/json",
+                "Accept-Encoding": "gzip",
+                "User-Agent": UA,
+            },
+            timeout=12,
+        )
+        if r.status_code != 200:
+            return None  # quota / rate limit / error -> fall through to ddgs
+        data = r.json()
+        items = data.get("results", []) if news else (data.get("web") or {}).get("results", [])
+        out = [
+            {
+                "title": it.get("title", ""),
+                "url": it.get("url", ""),
+                "body": it.get("description", "") or "",
+                "date": it.get("age", ""),
+            }
+            for it in items[:n]
+        ]
+        return out or None
+    except Exception:
+        return None
 ALLOW_PRIVATE_HOSTS = os.environ.get("WEBSEARCH_ALLOW_PRIVATE_HOSTS", "") == "1"
 MAX_BODY_BYTES = 20 * 1024 * 1024
 
@@ -177,7 +237,7 @@ def _search_all(query, n, news, region):
     last_err = "unknown"
     for reg in _regions_for(query, region):
         try:
-            res = _searxng(query, n, news) or _ddgs(query, n, news, reg)
+            res = _searxng(query, n, news) or _brave(query, n, news) or _ddgs(query, n, news, reg)
             if res:
                 return res
             last_err = f"region {reg}: no results"
