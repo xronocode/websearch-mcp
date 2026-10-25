@@ -4,3 +4,4 @@ cache.sqlite3
 .venv/
 build/
 *.egg-info/
+.pytest_cache/
