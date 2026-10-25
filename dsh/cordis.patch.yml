@@ -1,0 +1,15 @@
+# Connects the local-first websearch-mcp server over stdio as a Harness bundle.
+# Defaults expect `uv` on PATH: uvx installs and caches the Python server on the
+# first start. Override either variable to use an existing checkout instead:
+#   WEBSEARCH_MCP_COMMAND=/path/to/python
+#   WEBSEARCH_MCP_ARGS="/path/to/server.py"
+- insert:
+    - id: mcp-websearch
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: websearch
+        transport: stdio
+        command: !!js process.env.WEBSEARCH_MCP_COMMAND || 'uvx'
+        args: !!js (process.env.WEBSEARCH_MCP_ARGS || '--from git+https://github.com/xronocode/websearch-mcp websearch-mcp').split(' ')
+        toolCallTimeoutMs: 120000
+        failOnStartupError: false

@@ -1,0 +1,35 @@
+{
+  "name": "dsh-mcp-websearch",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness bundle: connects the local-first, zero-key websearch-mcp server (web search, news, semantic search, GitHub search, reader-mode fetch).",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "mcp",
+    "websearch",
+    "bundle"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xronocode/websearch-mcp.git",
+    "directory": "dsh"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

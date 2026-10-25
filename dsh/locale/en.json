@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Local Web Search (zero-key)",
+    "description": "Connects the local websearch-mcp server: web search, news, semantic search, GitHub search and reader-mode page fetch without API keys or quota."
+  }
+}

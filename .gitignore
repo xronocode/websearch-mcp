@@ -5,3 +5,5 @@ cache.sqlite3
 build/
 *.egg-info/
 .pytest_cache/
+dsh-local/
+dist/
