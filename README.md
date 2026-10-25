@@ -1,10 +1,10 @@
 # websearch-mcp
 
-Local-first, **zero-key, zero-quota** web search MCP server. Four lean tools that give any MCP client (ZCode, Claude Code, Codex, generic MCP) web search, news search, GitHub search and a token-efficient page/PDF fetcher — with no API keys, no signups and no hosted service metering your account.
+Local-first, **zero-key, zero-quota** web search MCP server. Five lean tools that give any MCP client (ZCode, Claude Code, Codex, generic MCP) web search, news search, semantic (neural) search, GitHub search and a token-efficient page/PDF fetcher — with no API keys, no signups and no hosted service metering your account.
 
 **Why:** built-in web search tools of AI coding plans are hosted and account-quota-metered. When the quota runs out, the agent goes blind for days. This server runs entirely on your machine: search goes through the [`ddgs`](https://pypi.org/project/ddgs/) aggregator library, which queries DuckDuckGo / Bing / Brave / Mojeek / Yahoo and falls back across engines when one rate-limits (403/429 are routine and handled). If you have a Brave Search API key, that official API is tried first instead.
 
-## Tools (4)
+## Tools (5)
 
 | Tool | What it does |
 |---|---|
@@ -68,7 +68,7 @@ Or run from a source checkout: `command`: `<python>`, `args`: `["/path/to/server
 | Cyrillic auto-region | ✅ | ✗ | ✗ | ✗ | ✗ | ✗ |
 | GitHub search | ✅ | ✗ | ✗ | ✗ | ✗ | ✗ |
 | Browser dependency | none (JS pages → your browser tool) | optional Chromium for some engines | ✗ | ships its own | ✗ | n/a |
-| Per-session tool-schema cost | 4 lean tools | 11 rich tools | few | many | few | n/a |
+| Per-session tool-schema cost | 5 lean tools, ~3.5 KB | 11 rich tools | few | many | few | n/a |
 | License | MIT | MIT | MIT | AGPL-3.0 | MIT | — |
 
 **When to pick something else:** free-search-mcp if you want the research-combine-harvester (RRF merge, doc formats, one-shot `research()`) and don't mind the 11-tool context tax and an external dependency; wigolo if you want the full local web intelligence stack and have 1.5 GB + GPU to spare; open-webSearch if your targets are CN dev resources; hosted built-ins when your quota is alive and quality matters most.
