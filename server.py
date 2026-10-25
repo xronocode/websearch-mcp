@@ -28,7 +28,8 @@ fetch 7d) so repeats cost zero tokens and zero engine hits.
 
 Security posture (see README for the trust model):
   - fetch allows only http/https and refuses hosts that resolve to
-    private/loopback/link-local addresses (SSRF guard); opt back in with
+    private/loopback/link-local addresses (SSRF guard), re-checking every
+    redirect hop before that hop is sent; opt back in with
     WEBSEARCH_ALLOW_PRIVATE_HOSTS=1
   - response bodies are capped (20 MB) to avoid memory spikes
   - no shell, no eval, no subprocess; GITHUB_TOKEN (optional) is only ever
@@ -57,6 +58,22 @@ logging.disable(logging.INFO)
 mcp = FastMCP("websearch")
 
 _CYRILLIC = re.compile("[а-яё]", re.IGNORECASE)
+
+# Hard caps: the caller is usually an LLM and may ask for any number. Bounding
+# both here keeps latency and context-window cost predictable.
+MAX_RESULTS = 20
+MIN_FETCH_MAXLEN = 500
+MAX_FETCH_MAXLEN = 30000
+REDIRECT_LIMIT = 5
+
+
+def _clamp(value, low: int, high: int) -> int:
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return low
+    return max(low, min(high, value))
+
 
 # --- local cache: repeats cost zero tokens and zero engine hits -------------
 _DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache.sqlite3")
@@ -213,14 +230,27 @@ def _tavily(query, n):
         return None
 
 
-def _gnews_rss(query, n):
-    """Google News RSS: zero-key news search, no scraping."""
+def _gnews_locale(query, region):
+    """Map a ddgs-style region ('de-de') to a Google News hl/gl/ceid edition."""
+    if region and region != "wt-wt" and "-" in region:
+        lang, country = region.split("-", 1)
+        if len(lang) == 2 and len(country) == 2:
+            lang, country = lang.lower(), country.upper()
+            return lang, country, f"{country}:{lang}"
+    if _CYRILLIC.search(query):
+        return "ru", "RU", "RU:ru"
+    return "en", "US", "US:en"
+
+
+def _gnews_rss(query, n, region=""):
+    """Google News RSS: zero-key news search, no scraping.
+
+    `region` (ddgs style, e.g. 'de-de') picks the Google News edition; empty
+    means auto-detect from the query script.
+    """
     import xml.etree.ElementTree as ET
 
-    if _CYRILLIC.search(query):
-        hl, gl, ceid = "ru", "RU", "RU:ru"
-    else:
-        hl, gl, ceid = "en", "US", "US:en"
+    hl, gl, ceid = _gnews_locale(query, region)
     try:
         r = httpx.get(
             "https://news.google.com/rss/search",
@@ -263,17 +293,25 @@ ALLOW_PRIVATE_HOSTS = os.environ.get("WEBSEARCH_ALLOW_PRIVATE_HOSTS", "") == "1"
 MAX_BODY_BYTES = 20 * 1024 * 1024
 
 
-def _host_is_public(host: str) -> bool:
-    # SSRF guard for the fetch tool: refuse hosts resolving to
-    # private/loopback/link-local ranges. TOCTOU vs CDNs re-resolving is
-    # accepted for this threat model; final redirect host is re-checked.
+def _host_check(host: str) -> tuple[bool, str]:
+    """SSRF guard for the fetch tool. Returns (is_public, reason).
+
+    Refuses hosts resolving to private/loopback/link-local/reserved/multicast
+    addresses, and hosts that do not resolve at all. The resolver is asked
+    again for every redirect hop, so a public URL bouncing to an internal one
+    is refused *before* that hop is sent. The TOCTOU window between this check
+    and the request itself is accepted for the threat model (single local
+    user; see README).
+    """
     import ipaddress
     import socket
 
     try:
         infos = socket.getaddrinfo(host, None)
-    except socket.gaierror:
-        return False
+    except (socket.gaierror, UnicodeError):
+        return False, f"host {host!r} did not resolve"
+    if not infos:
+        return False, f"host {host!r} did not resolve"
     for info in infos:
         try:
             ip = ipaddress.ip_address(info[4][0])
@@ -286,8 +324,8 @@ def _host_is_public(host: str) -> bool:
             or ip.is_reserved
             or ip.is_multicast
         ):
-            return False
-    return True
+            return False, f"host {host!r} resolves to {ip} (non-public address)"
+    return True, ""
 
 
 def _fmt(results):
@@ -338,44 +376,62 @@ def _ddgs(query, n, news, region):
 
 
 def _regions_for(query, region):
+    if region and region != "wt-wt":
+        # an explicit region is a preference, not a hard pin: one regional
+        # endpoint failing should not fail the whole call
+        return [region, "wt-wt"]
     if region:
-        return [region]
+        return ["wt-wt"]
     # auto: Cyrillic queries parse far better on ru-ru; engines are flaky
     # per-query, so always keep a second region as fallback.
     return ["ru-ru", "wt-wt"] if _CYRILLIC.search(query) else ["wt-wt", "us-en"]
 
 
 def _search_all(query, n, news, region):
-    """General web search: searxng -> brave -> ddgs (region chain)."""
+    """General web search: searxng -> brave once, then ddgs across regions.
+
+    Region-agnostic engines are tried once (Brave does not take a region, so
+    retrying it per region only burned latency); the ddgs chain walks regions
+    so one flaky regional endpoint cannot kill the call. A pause between
+    region rounds keeps the engines from rate-limiting back-to-back hits.
+    """
     last_err = "unknown"
-    for reg in _regions_for(query, region):
-        for name, fn in (
-            ("searxng", lambda: _searxng(query, n, news)),
-            ("brave", lambda: _brave(query, n, news)),
-            (f"ddgs:{reg}", lambda: _ddgs(query, n, news, reg)),
-        ):
-            try:
-                res = fn()
-                if res:
-                    return name, res
-                last_err = f"{name}: no results"
-            except Exception as e:
-                last_err = f"{name}: {e}"
-        time.sleep(1.2)
+    for name, fn in (
+        ("searxng", lambda: _searxng(query, n, news)),
+        ("brave", lambda: _brave(query, n, news)),
+    ):
+        try:
+            res = fn()
+            if res:
+                return name, res
+            last_err = f"{name}: no results"
+        except Exception as e:
+            last_err = f"{name}: {e}"
+    for i, reg in enumerate(_regions_for(query, region)):
+        if i:
+            time.sleep(1.2)
+        try:
+            res = _ddgs(query, n, news, reg)
+            if res:
+                return f"ddgs:{reg}", res
+            last_err = f"ddgs:{reg}: no results"
+        except Exception as e:
+            last_err = f"ddgs:{reg}: {e}"
     raise RuntimeError(f"all engines failed ({last_err})")
 
 
-def _news_search_all(query, n):
+def _news_search_all(query, n, region=""):
     """News search: zero-key Google News RSS first (saves API quota),
-    then Brave news, then ddgs."""
-    return _run_chain(
-        [
-            ("gnews-rss", lambda: _gnews_rss(query, n)),
-            ("brave", lambda: _brave(query, n, news=True)),
-            ("ddgs:ru-ru", lambda: _ddgs(query, n, news=True, region="ru-ru")),
-            ("ddgs:wt-wt", lambda: _ddgs(query, n, news=True, region="wt-wt")),
-        ]
-    )
+    then Brave news, then ddgs with the requested region and a generic retry."""
+    engines = [
+        ("gnews-rss", lambda: _gnews_rss(query, n, region)),
+        ("brave", lambda: _brave(query, n, news=True)),
+    ]
+    for reg in _regions_for(query, region):
+        engines.append(
+            (f"ddgs:{reg}", lambda reg=reg: _ddgs(query, n, news=True, region=reg))
+        )
+    return _run_chain(engines)
 
 
 def _html_to_text(html: str, url: str) -> str:
@@ -405,8 +461,9 @@ def search(query: str, max_results: int = 8, region: str = "") -> str:
     environment: try this tool first; use the built-in WebSearch only if this one errors.
     Returns numbered results (title, URL, snippet) and an [engine: ...] tag showing who
     answered. region optional ('ru-ru', 'us-en'); empty = auto (Cyrillic -> ru-ru first).
-    Results cached locally for 24h. Docs of libraries need no special engine: search
-    'site:docs...' + fetch the page."""
+    max_results is capped at 20. Results cached locally for 24h. Docs of libraries
+    need no special engine: search 'site:docs...' + fetch the page."""
+    max_results = _clamp(max_results, 1, MAX_RESULTS)
     key = _ckey("search", query.strip().lower(), max_results, region)
     hit = _cache_get(key, TTL_SEARCH)
     if hit is not None:
@@ -424,13 +481,16 @@ def search(query: str, max_results: int = 8, region: str = "") -> str:
 def search_news(query: str, max_results: int = 8, region: str = "") -> str:
     """Free LOCAL news search, no provider quota. Use for fresh announcements, launches,
     tariff/partnership news. Route: Google News RSS (zero-key) -> Brave news -> ddgs.
-    Returns title, URL, source, date and an [engine: ...] tag. Results cached 24h."""
-    key = _ckey("news", query.strip().lower(), max_results)
+    region optional ('de-de', 'us-en') selects the Google News edition and the
+    ddgs region; empty = auto from the query script. Returns title, URL, source,
+    date and an [engine: ...] tag. Results cached 24h."""
+    max_results = _clamp(max_results, 1, MAX_RESULTS)
+    key = _ckey("news", query.strip().lower(), max_results, region)
     hit = _cache_get(key, TTL_SEARCH)
     if hit is not None:
         return hit
     try:
-        name, res = _news_search_all(query, max_results)
+        name, res = _news_search_all(query, max_results, region)
     except Exception as e:
         return f"search_news failed: {type(e).__name__}: {e}"
     out = _fmt(res) + f"\n[engine: {name}]"
@@ -445,6 +505,7 @@ def search_semantic(query: str, max_results: int = 6) -> str:
     search misses. Route: Exa (neural) -> Tavily -> ddgs fallback; Exa/Tavily join only
     when their keys are installed (~/.config/websearch-mcp/exa.key / tavily.key).
     Returns title, URL, snippet, date and an [engine: ...] tag. Cached 24h."""
+    max_results = _clamp(max_results, 1, MAX_RESULTS)
     key = _ckey("semantic", query.strip().lower(), max_results)
     hit = _cache_get(key, TTL_SEARCH)
     if hit is not None:
@@ -473,6 +534,7 @@ def search_github(query: str, kind: str = "repos", max_results: int = 8) -> str:
     env for higher limits). kind='repos': find repositories by topic/name/description
     (sorted by stars). kind='issues': bug reports and discussions. Useful to find tools,
     code examples, whether something is maintained. Cached 24h."""
+    max_results = _clamp(max_results, 1, MAX_RESULTS)
     key = _ckey("github", kind, query.strip().lower(), max_results)
     hit = _cache_get(key, TTL_SEARCH)
     if hit is not None:
@@ -517,14 +579,70 @@ def search_github(query: str, kind: str = "repos", max_results: int = 8) -> str:
         return f"search_github failed: {type(e).__name__}: {e}"
 
 
+class _FetchError(Exception):
+    """A fetch refusal or limit violation, already formatted for the caller."""
+
+
+def _new_client(headers):
+    # Redirects are followed by hand: httpx's follow_redirects=True sends the
+    # private request before the final URL is ever visible to us.
+    return httpx.Client(timeout=25, follow_redirects=False, headers=headers)
+
+
+def _get_capped(url, headers):
+    """GET url, following redirects one vetted hop at a time.
+
+    Returns (content, content_type, charset). Raises _FetchError with a
+    user-facing message when a hop is refused, the body cap is exceeded or the
+    redirect chain is too long. Every hop's host is checked *before* the
+    request goes out.
+    """
+    from urllib.parse import urljoin, urlparse
+
+    current = url
+    with _new_client(headers) as client:
+        for _ in range(REDIRECT_LIMIT + 1):
+            host = urlparse(current).hostname or ""
+            if not ALLOW_PRIVATE_HOSTS:
+                ok, reason = _host_check(host)
+                if not ok:
+                    raise _FetchError(
+                        f"refusing to fetch {current}: {reason}; "
+                        "set WEBSEARCH_ALLOW_PRIVATE_HOSTS=1 to allow local targets"
+                    )
+            with client.stream("GET", current) as r:
+                if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("location"):
+                    current = urljoin(current, r.headers["location"])
+                    continue
+                cl = r.headers.get("content-length")
+                if cl and cl.isdigit() and int(cl) > MAX_BODY_BYTES:
+                    raise _FetchError(
+                        f"response larger than {MAX_BODY_BYTES // (1024 * 1024)} MB cap"
+                    )
+                chunks, total = [], 0
+                for chunk in r.iter_bytes():
+                    total += len(chunk)
+                    if total > MAX_BODY_BYTES:
+                        raise _FetchError("response exceeded 20 MB cap")
+                    chunks.append(chunk)
+                return (
+                    b"".join(chunks),
+                    r.headers.get("content-type", ""),
+                    r.encoding or "utf-8",
+                )
+    raise _FetchError(f"too many redirects (more than {REDIRECT_LIMIT})")
+
+
 @mcp.tool()
 def fetch(url: str, maxlen: int = 12000) -> str:
     """Free LOCAL URL fetch, no provider quota: GET the page and return readable text.
     HTML pages -> extracted main content with links and tables kept (much fewer tokens
     than raw dump); PDF -> extracted text (text-based PDFs only, scanned need OCR).
-    Only public http/https URLs; response capped at 20 MB. Cached locally for 7 days.
+    Only public http/https URLs; redirects are vetted hop by hop; response capped at
+    20 MB, maxlen capped at 30000. Cached locally for 7 days.
     If a page yields almost no text (JS-rendered or blocked), returns a note to use
     browser automation for that URL."""
+    maxlen = _clamp(maxlen, MIN_FETCH_MAXLEN, MAX_FETCH_MAXLEN)
     key = _ckey("fetch", url, maxlen)
     hit = _cache_get(key, TTL_FETCH)
     if hit is not None:
@@ -535,31 +653,8 @@ def fetch(url: str, maxlen: int = 12000) -> str:
         u = urlparse(url)
         if u.scheme not in ("http", "https") or not u.hostname:
             return "fetch failed: only http(s) URLs are supported"
-        if not ALLOW_PRIVATE_HOSTS and not _host_is_public(u.hostname):
-            return (
-                "fetch failed: host resolves to a private/loopback/link-local "
-                "address; set WEBSEARCH_ALLOW_PRIVATE_HOSTS=1 to allow local targets"
-            )
         headers = {"User-Agent": UA, "Accept-Language": "ru,en;q=0.8"}
-        with httpx.Client(timeout=25, follow_redirects=True, headers=headers) as client:
-            with client.stream("GET", url) as r:
-                # re-check the host after redirects: a public URL can bounce
-                # somewhere internal
-                final_host = urlparse(str(r.url)).hostname or ""
-                if not ALLOW_PRIVATE_HOSTS and not _host_is_public(final_host):
-                    return "fetch failed: redirect landed on a private address"
-                cl = r.headers.get("content-length")
-                if cl and cl.isdigit() and int(cl) > MAX_BODY_BYTES:
-                    return f"fetch failed: response larger than {MAX_BODY_BYTES // (1024*1024)} MB cap"
-                chunks, total = [], 0
-                for chunk in r.iter_bytes():
-                    total += len(chunk)
-                    if total > MAX_BODY_BYTES:
-                        return "fetch failed: response exceeded 20 MB cap"
-                    chunks.append(chunk)
-                content = b"".join(chunks)
-                ctype = r.headers.get("content-type", "")
-                charset = r.charset or "utf-8"
+        content, ctype, charset = _get_capped(url, headers)
         if "pdf" in ctype or url.lower().endswith(".pdf"):
             import io
 
@@ -582,6 +677,8 @@ def fetch(url: str, maxlen: int = 12000) -> str:
             )
         _cache_put(key, out)
         return out
+    except _FetchError as e:
+        return f"fetch failed: {e}"
     except Exception as e:
         return f"fetch failed: {type(e).__name__}: {e}"
 

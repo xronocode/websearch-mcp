@@ -1,6 +1,6 @@
 [project]
 name = "websearch-mcp"
-version = "0.3.0"
+version = "0.3.1"
 description = "Local-first, zero-key web search MCP server: ddgs multi-engine + semantic search, reader-mode fetch, PDF, local cache, GitHub search"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,6 +14,9 @@ dependencies = [
     "pypdf>=5",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
 [project.scripts]
 websearch-mcp = "server:main"
 
@@ -23,3 +26,8 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 py-modules = ["server"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
