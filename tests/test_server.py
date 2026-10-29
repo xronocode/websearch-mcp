@@ -360,6 +360,41 @@ def test_search_news_passes_region_and_caches_per_region(monkeypatch):
     assert calls == ["ru-ru", "us-en"], "regions must not share a cache entry"
 
 
+def test_search_semantic_walks_the_chain_and_caches(monkeypatch):
+    calls = []
+
+    def fake_exa(query, n):
+        calls.append("exa")
+        return None  # no key installed -> fall through
+
+    def fake_tavily(query, n):
+        calls.append("tavily")
+        return None
+
+    def fake_ddgs(query, n, news, region):
+        calls.append("ddgs")
+        return [{"title": "T", "url": "https://t", "body": "S"}]
+
+    monkeypatch.setattr(server, "_exa", fake_exa)
+    monkeypatch.setattr(server, "_tavily", fake_tavily)
+    monkeypatch.setattr(server, "_ddgs", fake_ddgs)
+
+    first = server.search_semantic("meaning query")
+    second = server.search_semantic("meaning query")
+
+    assert calls == ["exa", "tavily", "ddgs"], "the chain must be walked once"
+    assert "[engine: ddgs:wt-wt]" in first
+    assert "[local cache" in second
+
+
+def test_search_semantic_reports_failure_without_raising(monkeypatch):
+    monkeypatch.setattr(server, "_exa", lambda query, n: None)
+    monkeypatch.setattr(server, "_tavily", lambda query, n: None)
+    monkeypatch.setattr(server, "_ddgs", lambda query, n, news, region: None)
+
+    assert server.search_semantic("q").startswith("search_semantic failed: RuntimeError")
+
+
 @pytest.mark.parametrize(
     "query,region,expected",
     [
@@ -444,6 +479,112 @@ def test_fmt_numbers_results_and_handles_empty():
     assert out.startswith("1. A")
     assert "https://a" in out
     assert server._fmt([]) == "no results"
+
+
+# --- search_github ----------------------------------------------------------
+
+
+class _FakeGHResponse:
+    """Minimal httpx.Response stand-in for the GitHub search API."""
+
+    def __init__(self, status_code=200, payload=None):
+        self.status_code = status_code
+        self._payload = payload or {}
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+def test_search_github_formats_repos_and_caches(monkeypatch):
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        return _FakeGHResponse(
+            payload={
+                "items": [
+                    {
+                        "full_name": "octocat/hello",
+                        "stargazers_count": 1234,
+                        "language": "Python",
+                        "pushed_at": "2026-10-01T00:00:00Z",
+                        "html_url": "https://github.com/octocat/hello",
+                        "description": " demo repo ",
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+
+    first = server.search_github("hello")
+    second = server.search_github("hello")
+
+    assert calls == ["https://api.github.com/search/repositories"], (
+        "second call must come from the cache"
+    )
+    assert "1. octocat/hello * 1234 [Python] pushed 2026-10-01" in first
+    assert "https://github.com/octocat/hello" in first
+    assert first.rstrip().endswith("demo repo"), "description must be stripped"
+    assert "[local cache" in second
+
+
+def test_search_github_issues_hit_the_issues_endpoint(monkeypatch):
+    captured = {}
+
+    def fake_get(url, **kwargs):
+        captured["url"] = url
+        captured["params"] = kwargs.get("params", {})
+        return _FakeGHResponse(
+            payload={
+                "items": [
+                    {
+                        "title": "Bug: crash",
+                        "state": "open",
+                        "updated_at": "2026-10-02T00:00:00Z",
+                        "html_url": "https://github.com/o/r/issues/1",
+                        "repository_url": "https://api.github.com/repos/o/r",
+                        "body": "steps to reproduce",
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+
+    out = server.search_github("crash", kind="issues")
+
+    assert captured["url"] == "https://api.github.com/search/issues"
+    assert "Bug: crash [open] 2026-10-02" in out
+    assert "repo: r" in out
+
+
+def test_search_github_rate_limit_is_reported_and_not_cached(monkeypatch):
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        return _FakeGHResponse(status_code=403)
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+
+    first = server.search_github("q")
+    second = server.search_github("q")
+
+    assert "GitHub rate limit hit" in first
+    assert len(calls) == 2, "the rate-limit answer must not be cached"
+
+
+def test_search_github_reports_failure_without_raising(monkeypatch):
+    monkeypatch.setattr(
+        httpx, "get", lambda url, **kwargs: _FakeGHResponse(status_code=500)
+    )
+
+    assert server.search_github("q").startswith("search_github failed: RuntimeError")
 
 
 # --- Google News RSS -------------------------------------------------------
