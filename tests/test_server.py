@@ -4,6 +4,7 @@ No network and no API keys: DNS, HTTP (httpx.MockTransport) and the cache file
 are stubbed, so the suite runs offline and in CI.
 """
 
+import asyncio
 import socket
 import sqlite3
 import time
@@ -85,6 +86,28 @@ def test_ckey_is_stable_and_argument_sensitive():
 )
 def test_clamp(raw, expected):
     assert server._clamp(raw, 1, server.MAX_RESULTS) == expected
+
+
+# --- tool annotations --------------------------------------------------------
+
+
+def test_every_tool_declares_the_full_read_only_hint_set():
+    tools = {t.name: t for t in asyncio.run(server.mcp.list_tools())}
+
+    assert set(tools) == {
+        "search",
+        "search_news",
+        "search_semantic",
+        "search_github",
+        "fetch",
+    }
+    for name, tool in tools.items():
+        ann = tool.annotations
+        assert ann is not None, f"{name} declares no annotations"
+        assert ann.readOnlyHint is True, name
+        assert ann.destructiveHint is False, name
+        assert ann.idempotentHint is True, name
+        assert ann.openWorldHint is True, name
 
 
 # --- SSRF guard ------------------------------------------------------------

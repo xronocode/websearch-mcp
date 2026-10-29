@@ -50,12 +50,23 @@ import time
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 # ddgs logs every engine attempt (403/429 fallbacks) and mcp logs each request
 # at INFO -> noise in the stdio error stream ZCode captures; keep WARNING+ only.
 logging.disable(logging.INFO)
 
 mcp = FastMCP("websearch")
+
+# All five tools are read-only retrievers over the open web. The hint set is
+# declared explicitly because directories (e.g. OpenAI's) reject tools with
+# missing or non-boolean hints.
+_READONLY_OPEN_WORLD = ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=True,
+)
 
 _CYRILLIC = re.compile("[а-яё]", re.IGNORECASE)
 
@@ -455,7 +466,7 @@ def _html_to_text(html: str, url: str) -> str:
     return h.handle(html)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READONLY_OPEN_WORLD)
 def search(query: str, max_results: int = 8, region: str = "") -> str:
     """Free LOCAL web search, no provider quota. DEFAULT choice for web search in this
     environment: try this tool first; use the built-in WebSearch only if this one errors.
@@ -477,7 +488,7 @@ def search(query: str, max_results: int = 8, region: str = "") -> str:
     return out
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READONLY_OPEN_WORLD)
 def search_news(query: str, max_results: int = 8, region: str = "") -> str:
     """Free LOCAL news search, no provider quota. Use for fresh announcements, launches,
     tariff/partnership news. Route: Google News RSS (zero-key) -> Brave news -> ddgs.
@@ -498,7 +509,7 @@ def search_news(query: str, max_results: int = 8, region: str = "") -> str:
     return out
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READONLY_OPEN_WORLD)
 def search_semantic(query: str, max_results: int = 6) -> str:
     """Free LOCAL semantic/neural web search. Use for meaning-style research queries —
     'articles about X', 'how companies solve Y', solution discovery — where keyword
@@ -528,7 +539,7 @@ def search_semantic(query: str, max_results: int = 6) -> str:
 _GH_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READONLY_OPEN_WORLD)
 def search_github(query: str, kind: str = "repos", max_results: int = 8) -> str:
     """Free LOCAL GitHub search via the official REST API, no key needed (set GITHUB_TOKEN
     env for higher limits). kind='repos': find repositories by topic/name/description
@@ -633,7 +644,7 @@ def _get_capped(url, headers):
     raise _FetchError(f"too many redirects (more than {REDIRECT_LIMIT})")
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READONLY_OPEN_WORLD)
 def fetch(url: str, maxlen: int = 12000) -> str:
     """Free LOCAL URL fetch, no provider quota: GET the page and return readable text.
     HTML pages -> extracted main content with links and tables kept (much fewer tokens
